@@ -28,9 +28,11 @@
   inputs.flake-compat.url = "github:edolstra/flake-compat";
   inputs.flake-compat.flake = false;
 
+  inputs.foundry.url = "github:shazow/foundry.nix/monthly"; # Use monthly branch for permanent releases
+
   inputs.pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
-  outputs = { self, nixpkgs, rust-overlay, nixpkgs-cross-overlay, flake-utils, pre-commit-hooks, fenix, ... }:
+  outputs = { self, nixpkgs, rust-overlay, nixpkgs-cross-overlay, flake-utils, pre-commit-hooks, fenix, foundry, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         RUST_LOG = "info,isahc=error,surf=error";
@@ -38,6 +40,7 @@
 
         overlays = [
           (import rust-overlay)
+          foundry.overlay
         ];
         pkgs = import nixpkgs {
           inherit system overlays;
@@ -125,6 +128,7 @@
                 nixWithFlakes
                 entr
                 nodePackages.prettier
+                foundry-bin
               ] ++ lib.optionals stdenv.isDarwin [ darwin.apple_sdk.frameworks.SystemConfiguration ];
               shellHook = ''
                 # Prevent cargo aliases from using programs in `~/.cargo` to avoid conflicts
