@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+nix develop .#crossShell --command cargo build --release
+nix develop .#armCrossShell --command cargo build --release
+
+# Copy binaries to a temporary directory.
+WORKDIR=$(mktemp -d -t discord-faucet-docker-build-XXXXXXXX)
+
+trap "exit" INT TERM
+trap cleanup EXIT
+cleanup(){
+    rm -rfv ${WORKDIR}
+}
+
+for ARCH in "amd64" "arm64"; do
+  case "$ARCH" in
+    amd64)
+      TARGET=x86_64-unknown-linux-musl
+      ;;
+    arm64)
+      TARGET=aarch64-unknown-linux-musl
+      ;;
+    *)
+      echo "Unknown arch: $ARCH"
+      exit 1
+      ;;
+  esac
+  mkdir -p ${WORKDIR}/target/$ARCH/release
+  for binary in "discord-faucet"; do
+    cp -v target/${TARGET}/release/$binary ${WORKDIR}/target/$ARCH/release
+  done
+done
+
+export DOCKER_BUILDKIT=1
+docker build -t ghcr.io/espressosystems/discord-faucet:main -f Dockerfile ${WORKDIR}
