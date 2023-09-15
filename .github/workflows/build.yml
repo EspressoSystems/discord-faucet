@@ -26,6 +26,9 @@ jobs:
           all_but_latest: true
           access_token: ${{ github.token }}
 
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
       - uses: actions/checkout@v4
         name: Checkout Repository
         with:
