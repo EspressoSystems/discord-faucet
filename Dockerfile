@@ -9,4 +9,8 @@ RUN apt-get update \
 COPY target/$TARGETARCH/release/discord-faucet /bin/discord-faucet
 RUN chmod +x /bin/discord-faucet
 
+ENV ESPRESSO_DISCORD_FAUCET_PORT=8111
+
 CMD [ "/bin/discord-faucet"]
+
+HEALTHCHECK --interval=2s --timeout=1s --retries=10 CMD curl --fail http://localhost:$ESPRESSO_DISCORD_FAUCET_PORT/healthcheck || exit 1
