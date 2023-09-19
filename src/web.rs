@@ -152,21 +152,35 @@ mod test {
     }
 
     #[async_std::test]
-    async fn test_faucet_anvil() -> Result<()> {
+    async fn test_faucet_anvil_ws() -> Result<()> {
+        test_faucet_anvil(true).await
+    }
+
+    #[async_std::test]
+    async fn test_faucet_anvil_http() -> Result<()> {
+        test_faucet_anvil(false).await
+    }
+
+    async fn test_faucet_anvil(ws: bool) -> Result<()> {
         setup_logging();
         setup_backtrace();
 
         let anvil = AnvilOptions::default().spawn().await;
 
-        let mut ws_url = anvil.url();
-        ws_url.set_scheme("ws").unwrap();
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
 
         // With anvil 10 clients are pre-funded. We use more than that to make
         // sure the funding logic runs.
         let options = Options {
             num_clients: 12,
             faucet_grant_amount: parse_ether(1).unwrap(),
-            provider_url_ws: ws_url,
+            provider_url_ws,
             provider_url_http: anvil.url(),
             port: portpicker::pick_unused_port().unwrap(),
             ..Default::default()
@@ -186,22 +200,36 @@ mod test {
     }
 
     #[async_std::test]
-    async fn test_node_restart() -> Result<()> {
+    async fn test_node_restart_ws() -> Result<()> {
+        test_node_restart(true).await
+    }
+
+    #[async_std::test]
+    async fn test_node_restart_http() -> Result<()> {
+        test_node_restart(false).await
+    }
+
+    async fn test_node_restart(ws: bool) -> Result<()> {
         setup_logging();
         setup_backtrace();
 
         let anvil_opts = AnvilOptions::default();
         let mut anvil = anvil_opts.clone().spawn().await;
 
-        let mut ws_url = anvil.url();
-        ws_url.set_scheme("ws").unwrap();
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
 
         // With anvil 10 clients are pre-funded. We use more than that to make
         // sure the funding logic runs.
         let options = Options {
             num_clients: 12,
             faucet_grant_amount: parse_ether(1).unwrap(),
-            provider_url_ws: ws_url,
+            provider_url_ws,
             provider_url_http: anvil.url(),
             port: portpicker::pick_unused_port().unwrap(),
             ..Default::default()
@@ -226,17 +254,31 @@ mod test {
         Ok(())
     }
 
-    // A test to verify that the faucet functions if it's funded only after startup.
     #[async_std::test]
-    async fn test_unfunded_faucet() -> Result<()> {
+    async fn test_unfunded_faucet_ws() -> Result<()> {
+        test_unfunded_faucet(true).await
+    }
+
+    #[async_std::test]
+    async fn test_unfunded_faucet_http() -> Result<()> {
+        test_unfunded_faucet(false).await
+    }
+
+    // A test to verify that the faucet functions if it's funded only after startup.
+    async fn test_unfunded_faucet(ws: bool) -> Result<()> {
         setup_logging();
         setup_backtrace();
 
         let anvil_opts = AnvilOptions::default();
         let anvil = anvil_opts.clone().spawn().await;
 
-        let mut ws_url = anvil.url();
-        ws_url.set_scheme("ws").unwrap();
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
 
         let provider = Provider::<Http>::try_from(anvil.url().to_string())?;
         let chain_id = provider.get_chainid().await?.as_u64();
@@ -260,7 +302,7 @@ mod test {
         let options = Options {
             num_clients: 2,
             faucet_grant_amount: parse_ether(1).unwrap(),
-            provider_url_ws: ws_url,
+            provider_url_ws,
             provider_url_http: anvil.url(),
             port: portpicker::pick_unused_port().unwrap(),
             mnemonic,

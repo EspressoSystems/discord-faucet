@@ -5,7 +5,11 @@
 // along with the Discord Faucet library. If not, see <https://mit-license.org/>.
 
 use anyhow::{Error, Result};
-use async_std::{channel::Receiver, sync::RwLock, task::JoinHandle};
+use async_std::{
+    channel::Receiver,
+    sync::RwLock,
+    task::{sleep, JoinHandle},
+};
 use clap::Parser;
 use ethers::{
     prelude::SignerMiddleware,
@@ -52,6 +56,14 @@ pub struct Options {
     #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_MNEMONIC")]
     pub mnemonic: String,
 
+    /// The index in the HD key derivation tree derived from mnemonic of the first account to use
+    /// for faucet transfers.
+    ///
+    /// Subsequent accounts, if requested, will be derived from consecutively increasing account
+    /// indices.
+    #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX")]
+    pub first_account_index: u32,
+
     /// Port on which to serve the API.
     #[arg(
         short,
@@ -78,9 +90,13 @@ pub struct Options {
     )]
     pub transaction_timeout: Duration,
 
-    /// The URL of the JsonRPC the faucet connects to.
+    /// The URL of the WebSockets JsonRPC the faucet connects to.
+    ///
+    /// If provided, the faucet will use this endpoint for monitoring transactions and streaming
+    /// receipts. If not provided, it will fall back to polling provider-url-http, which can be less
+    /// efficient.
     #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_WEB3_PROVIDER_URL_WS")]
-    pub provider_url_ws: Url,
+    pub provider_url_ws: Option<Url>,
 
     /// The URL of the JsonRPC the faucet connects to.
     #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_WEB3_PROVIDER_URL_HTTP")]
@@ -89,6 +105,15 @@ pub struct Options {
     /// The authentication token for the discord bot.
     #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_DISCORD_TOKEN")]
     pub discord_token: Option<String>,
+
+    /// The polling interval for HTTP subscriptions to the RPC provider.
+    #[arg(
+        long,
+        env = "ESPRESSO_DISCORD_FAUCET_POLL_INTERVAL",
+        default_value = "7s",
+        value_parser = duration_str::parse,
+    )]
+    pub poll_interval: Duration,
 }
 
 impl Default for Options {
@@ -96,12 +121,14 @@ impl Default for Options {
         Self {
             num_clients: 10,
             mnemonic: TEST_MNEMONIC.to_string(),
+            first_account_index: 0,
             port: 8111,
             faucet_grant_amount: parse_ether("100").unwrap(),
             transaction_timeout: Duration::from_secs(300),
-            provider_url_ws: Url::parse("ws://localhost:8545").unwrap(),
+            provider_url_ws: Some(Url::parse("ws://localhost:8545").unwrap()),
             provider_url_http: Url::parse("http://localhost:8545").unwrap(),
             discord_token: None,
+            poll_interval: Duration::from_secs(7),
         }
     }
 }
@@ -231,6 +258,7 @@ pub struct Faucet {
     state: Arc<RwLock<State>>,
     /// Used to monitor Ethereum transactions.
     provider: Provider<Http>,
+    ws_provider: Option<Provider<Ws>>,
     /// Channel to receive faucet requests.
     faucet_receiver: Arc<RwLock<Receiver<Address>>>,
 }
@@ -243,7 +271,8 @@ impl Faucet {
     /// balance.
     pub async fn create(options: Options, faucet_receiver: Receiver<Address>) -> Result<Self> {
         // Use a http provider for non-subscribe requests
-        let provider = Provider::<Http>::try_from(options.provider_url_http.to_string())?;
+        let provider = Provider::<Http>::try_from(options.provider_url_http.to_string())?
+            .interval(options.poll_interval);
         let chain_id = provider.get_chainid().await?.as_u64();
 
         let mut state = State::default();
@@ -258,7 +287,7 @@ impl Faucet {
         for index in 0..options.num_clients {
             let wallet = MnemonicBuilder::<English>::default()
                 .phrase(options.mnemonic.as_str())
-                .index(index as u32)?
+                .index(options.first_account_index + (index as u32))?
                 .build()?
                 .with_chain_id(chain_id);
             let client = Arc::new(Middleware::new(provider.clone(), wallet));
@@ -304,10 +333,16 @@ impl Faucet {
             }
         }
 
+        let ws_provider = match &options.provider_url_ws {
+            Some(url) => Some(Provider::<Ws>::connect(url.clone()).await?),
+            None => None,
+        };
+
         Ok(Self {
             config: options,
             state: Arc::new(RwLock::new(state)),
             provider,
+            ws_provider,
             faucet_receiver: Arc::new(RwLock::new(faucet_receiver)),
         })
     }
@@ -550,26 +585,56 @@ impl Faucet {
 
     async fn monitor_transactions(&self) -> Result<()> {
         loop {
-            let provider = match Provider::<Ws>::connect(self.config.provider_url_ws.clone()).await
-            {
-                Ok(provider) => provider,
-                Err(err) => {
-                    tracing::error!("Failed to connect to provider: {}, will retry", err);
-                    async_std::task::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
+            let stream = match &self.ws_provider {
+                Some(provider) => provider.subscribe_blocks().await.unwrap().boxed(),
+                None => self
+                    .provider
+                    .watch_blocks()
+                    .await
+                    .unwrap()
+                    .then(|block_hash| async move {
+                        loop {
+                            match self.provider.get_block(block_hash).await {
+                                Ok(Some(block)) => break Ok(block),
+                                Ok(None) =>
+                                // Pass the block hash through so we can use it for error
+                                // handling.
+                                {
+                                    break Err(block_hash)
+                                }
+                                Err(err) => {
+                                    tracing::error!(
+                                        "Failed to get block {block_hash}: {err}, will retry"
+                                    );
+                                    sleep(Duration::from_secs(5)).await;
+                                }
+                            }
+                        }
+                    })
+                    .filter_map(|res| async move {
+                        match res {
+                            Ok(block) => Some(block),
+                            Err(hash) => {
+                                // `provider.get_block` is allowed to return `None` if it cannot
+                                // find a block with the requested hash. Since we only ever request
+                                // block hashes that have just been confirmed by `watch_blocks`, the
+                                // only way a block can possibly be missing is if there was an L2
+                                // reorg. This is rare but possible. In this case, since the block
+                                // we were fetching has been re-orged out, we can just ignore it.
+                                tracing::error!(
+                                    "received hash {hash} from watch_blocks, but block was missing"
+                                );
+                                None
+                            }
+                        }
+                    })
+                    .boxed(),
             };
 
-            // There is some room for optimization here because we are fetching
-            // every transaction receipt. We could use the `get_block_with_txs` of
-            // the ethers-rs provider to avoid fetching individual transaction
-            // receipts.
-
-            let mut stream = provider
-                .subscribe_blocks()
-                .await
-                .unwrap()
-                .flat_map(|block| futures::stream::iter(block.transactions));
+            // There is some room for optimization here because we are fetching every transaction
+            // receipt. We could use the `get_block_with_txs` of the ethers-rs provider to avoid
+            // fetching individual transaction receipts.
+            let mut stream = stream.flat_map(|block| futures::stream::iter(block.transactions));
 
             self.state.write().await.monitoring_started = true;
             tracing::info!("Transaction monitoring started ...");
@@ -634,7 +699,16 @@ mod test {
     use sequencer_utils::AnvilOptions;
 
     #[async_std::test]
-    async fn test_faucet_inflight_timeouts() -> Result<()> {
+    async fn test_faucet_inflight_timeouts_ws() -> Result<()> {
+        test_faucet_inflight_timeouts(true).await
+    }
+
+    #[async_std::test]
+    async fn test_faucet_inflight_timeouts_http() -> Result<()> {
+        test_faucet_inflight_timeouts(false).await
+    }
+
+    async fn test_faucet_inflight_timeouts(ws: bool) -> Result<()> {
         setup_logging();
         setup_backtrace();
 
@@ -643,12 +717,17 @@ mod test {
             .spawn()
             .await;
 
-        let mut ws_url = anvil.url();
-        ws_url.set_scheme("ws").unwrap();
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
 
         let options = Options {
             num_clients: 1,
-            provider_url_ws: ws_url,
+            provider_url_ws,
             provider_url_http: anvil.url(),
             transaction_timeout: Duration::from_secs(0),
             ..Default::default()
@@ -678,21 +757,35 @@ mod test {
         Ok(())
     }
 
+    #[async_std::test]
+    async fn test_faucet_funding_ws() -> Result<()> {
+        test_faucet_funding(true).await
+    }
+
+    #[async_std::test]
+    async fn test_faucet_funding_http() -> Result<()> {
+        test_faucet_funding(false).await
+    }
+
     // A regression test for a bug where clients that received funding transfers
     // were not made available.
-    #[async_std::test]
-    async fn test_faucet_funding() -> Result<()> {
+    async fn test_faucet_funding(ws: bool) -> Result<()> {
         setup_logging();
         setup_backtrace();
 
         let anvil = AnvilOptions::default().spawn().await;
 
-        let mut ws_url = anvil.url();
-        ws_url.set_scheme("ws").unwrap();
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
         let options = Options {
             // 10 clients are already funded with anvil
             num_clients: 11,
-            provider_url_ws: ws_url,
+            provider_url_ws,
             provider_url_http: anvil.url(),
             ..Default::default()
         };
