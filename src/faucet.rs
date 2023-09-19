@@ -49,6 +49,14 @@ pub struct Options {
     #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_MNEMONIC")]
     pub mnemonic: String,
 
+    /// The index in the HD key derivation tree derived from mnemonic of the first account to use
+    /// for faucet transfers.
+    ///
+    /// Subsequent accounts, if requested, will be derived from consecutively increasing account
+    /// indices.
+    #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX")]
+    pub first_account_index: u32,
+
     /// Port on which to serve the API.
     #[arg(
         short,
@@ -93,6 +101,7 @@ impl Default for Options {
         Self {
             num_clients: 10,
             mnemonic: "test test test test test test test test test test test junk".to_string(),
+            first_account_index: 0,
             port: 8111,
             faucet_grant_amount: parse_ether("100").unwrap(),
             transaction_timeout: Duration::from_secs(300),
@@ -246,7 +255,7 @@ impl Faucet {
         for index in 0..options.num_clients {
             let wallet = MnemonicBuilder::<English>::default()
                 .phrase(options.mnemonic.as_str())
-                .index(index as u32)?
+                .index(options.first_account_index + (index as u32))?
                 .build()?
                 .with_chain_id(chain_id);
             let client = Arc::new(Middleware::new(provider.clone(), wallet));
