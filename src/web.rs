@@ -105,17 +105,18 @@ impl WebState {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::faucet::{Faucet, Options};
+    use crate::faucet::{Faucet, Middleware, Options, TEST_MNEMONIC};
     use anyhow::Result;
     use async_compatibility_layer::logging::{setup_backtrace, setup_logging};
     use async_std::task::spawn;
     use ethers::{
-        providers::{Http, Middleware, Provider},
-        types::U256,
+        providers::{Http, Middleware as _, Provider},
+        signers::{coins_bip39::English, MnemonicBuilder, Signer},
+        types::{TransactionRequest, U256},
         utils::parse_ether,
     };
     use sequencer_utils::AnvilOptions;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
     use surf_disco::Client;
 
     async fn run_faucet_test(options: Options, num_transfers: usize) -> Result<()> {
@@ -247,6 +248,84 @@ mod test {
 
         tracing::info!("Restarting anvil to trigger web socket reconnect");
         anvil.restart(anvil_opts).await;
+
+        run_faucet_test(options, 3).await?;
+
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_unfunded_faucet_ws() -> Result<()> {
+        test_unfunded_faucet(true).await
+    }
+
+    #[async_std::test]
+    async fn test_unfunded_faucet_http() -> Result<()> {
+        test_unfunded_faucet(false).await
+    }
+
+    // A test to verify that the faucet functions if it's funded only after startup.
+    async fn test_unfunded_faucet(ws: bool) -> Result<()> {
+        setup_logging();
+        setup_backtrace();
+
+        let anvil_opts = AnvilOptions::default();
+        let anvil = anvil_opts.clone().spawn().await;
+
+        let provider_url_ws = if ws {
+            let mut ws_url = anvil.url();
+            ws_url.set_scheme("ws").unwrap();
+            Some(ws_url)
+        } else {
+            None
+        };
+
+        let provider = Provider::<Http>::try_from(anvil.url().to_string())?;
+        let chain_id = provider.get_chainid().await?.as_u64();
+
+        let funded_wallet = MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .index(0u32)?
+            .build()?
+            .with_chain_id(chain_id);
+        let funded_client = Arc::new(Middleware::new(provider.clone(), funded_wallet));
+
+        // An unfunded mnemonic
+        let mnemonic =
+            "obvious clean kidney better photo young sun similar unit home half rough".to_string();
+        let faucet_wallet = MnemonicBuilder::<English>::default()
+            .phrase(mnemonic.as_str())
+            .index(0u32)?
+            .build()?
+            .with_chain_id(chain_id);
+
+        let options = Options {
+            num_clients: 2,
+            faucet_grant_amount: parse_ether(1).unwrap(),
+            provider_url_ws,
+            provider_url_http: anvil.url(),
+            port: portpicker::pick_unused_port().unwrap(),
+            mnemonic,
+            ..Default::default()
+        };
+
+        let (sender, receiver) = async_std::channel::unbounded();
+
+        // Start the faucet
+        let faucet = Faucet::create(options.clone(), receiver).await?;
+        let _handle = faucet.start().await;
+
+        // Start the web server
+        spawn(async move { serve(options.port, WebState::new(sender)).await });
+
+        // Transfer some funds to the faucet
+        funded_client
+            .send_transaction(
+                TransactionRequest::pay(faucet_wallet.address(), options.faucet_grant_amount * 100),
+                None,
+            )
+            .await?
+            .await?;
 
         run_faucet_test(options, 3).await?;
 

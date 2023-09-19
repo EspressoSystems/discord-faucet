@@ -15,7 +15,7 @@ use ethers::{
     prelude::SignerMiddleware,
     providers::{Http, Middleware as _, Provider, StreamExt, Ws},
     signers::{coins_bip39::English, LocalWallet, MnemonicBuilder, Signer},
-    types::{Address, TransactionRequest, H256, U256, U512},
+    types::{Address, TransactionReceipt, TransactionRequest, H256, U256, U512},
     utils::{parse_ether, ConversionError},
 };
 use std::{
@@ -29,6 +29,9 @@ use thiserror::Error;
 use url::Url;
 
 pub type Middleware = SignerMiddleware<Provider<Http>, LocalWallet>;
+
+pub(crate) const TEST_MNEMONIC: &str =
+    "test test test test test test test test test test test junk";
 
 #[derive(Parser, Debug, Clone)]
 pub struct Options {
@@ -117,7 +120,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             num_clients: 10,
-            mnemonic: "test test test test test test test test test test test junk".to_string(),
+            mnemonic: TEST_MNEMONIC.to_string(),
             first_account_index: 0,
             port: 8111,
             faucet_grant_amount: parse_ether("100").unwrap(),
@@ -127,6 +130,15 @@ impl Default for Options {
             discord_token: None,
             poll_interval: Duration::from_secs(7),
         }
+    }
+}
+
+impl Options {
+    /// Returns the minimum balance required to consider a client funded.
+    ///
+    /// Set to 2 times the faucet grant amount to be on the safe side regarding gas.
+    fn min_funding_balance(&self) -> U256 {
+        self.faucet_grant_amount * 2
     }
 }
 
@@ -300,7 +312,10 @@ impl Faucet {
             clients.push((balance, client));
         }
 
-        let desired_balance = total_balance / options.num_clients * 8 / 10;
+        let desired_balance = std::cmp::max(
+            total_balance / options.num_clients * 8 / 10,
+            options.min_funding_balance().into(),
+        );
         // At this point, `desired_balance` is less than the average of all the clients' balances,
         // each of which was a `U256`, so we can safely cast back into a `U256`.
         let desired_balance =
@@ -446,19 +461,46 @@ impl Faucet {
         }
     }
 
+    /// Handle external incoming transfers to faucet accounts
+    async fn handle_non_faucet_transfer(&self, receipt: &TransactionReceipt) -> Result<()> {
+        tracing::debug!("Handling external incoming transfer to {:?}", receipt.to);
+        if let Some(receiver) = receipt.to {
+            if self
+                .state
+                .read()
+                .await
+                .clients_being_funded
+                .contains_key(&receiver)
+            {
+                let balance = self.balance(receiver).await?;
+                if balance >= self.config.min_funding_balance() {
+                    tracing::info!("Funded client {:?} with external transfer", receiver);
+                    let mut state = self.state.write().await;
+                    if let Some(transfer_index) =
+                        state.transfer_queue.iter().position(|r| r.to() == receiver)
+                    {
+                        tracing::info!("Removing funding request from queue");
+                        state.transfer_queue.remove(transfer_index);
+                    } else {
+                        tracing::warn!("Funding request not found in queue");
+                    }
+                    tracing::info!("Making client {receiver:?} available");
+                    let client = state.clients_being_funded.remove(&receiver).unwrap();
+                    state.clients.push(balance, client);
+                } else {
+                    tracing::warn!(
+                        "Balance for client {receiver:?} {balance:?} too low to make it available"
+                    );
+                }
+            } else {
+                tracing::debug!("Irrelevant transaction {:?}", receipt.transaction_hash);
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_receipt(&self, tx_hash: H256) -> Result<()> {
         tracing::debug!("Got tx hash {:?}", tx_hash);
-
-        let Transfer {
-            sender, request, ..
-        } = {
-            if let Some(inflight) = self.state.read().await.inflight.get(&tx_hash) {
-                inflight.clone()
-            } else {
-                // Not a transaction we are monitoring.
-                return Ok(());
-            }
-        };
 
         // In case there is a race condition and the receipt is not yet available, wait for it.
         let receipt = loop {
@@ -469,8 +511,21 @@ impl Faucet {
             async_std::task::sleep(Duration::from_secs(1)).await;
         };
 
-        tracing::info!("Received receipt for {:?}", request);
+        tracing::debug!("Got receipt {:?}", receipt);
 
+        // Using `cloned` here to avoid borrow
+        let inflight = self.state.read().await.inflight.get(&tx_hash).cloned();
+        if inflight.is_none() {
+            // Not a transaction we are monitoring but the recipient could
+            // be a faucet account that is waiting for funding.
+            return self.handle_non_faucet_transfer(&receipt).await;
+        }
+
+        let Transfer {
+            sender, request, ..
+        } = inflight.unwrap();
+
+        tracing::info!("Received receipt for {request:?}");
         // Do all external calls before state modifications
         let new_sender_balance = self.balance(sender.address()).await?;
 
@@ -575,6 +630,10 @@ impl Faucet {
                     })
                     .boxed(),
             };
+
+            // There is some room for optimization here because we are fetching every transaction
+            // receipt. We could use the `get_block_with_txs` of the ethers-rs provider to avoid
+            // fetching individual transaction receipts.
             let mut stream = stream.flat_map(|block| futures::stream::iter(block.transactions));
 
             self.state.write().await.monitoring_started = true;
@@ -610,6 +669,7 @@ impl Faucet {
     }
 
     async fn process_transaction_timeouts(&self) -> Result<()> {
+        tracing::info!("Processing transaction timeouts");
         let inflight = self.state.read().await.inflight.clone();
 
         for (
