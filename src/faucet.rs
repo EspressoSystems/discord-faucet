@@ -106,6 +106,15 @@ impl Default for Options {
     }
 }
 
+impl Options {
+    /// Returns the minimum balance required to consider a client funded.
+    ///
+    /// Set to 2 times the faucet grant amount to be on the safe side regarding gas.
+    fn min_funding_balance(&self) -> U256 {
+        self.faucet_grant_amount * 2
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TransferRequest {
     Faucet {
@@ -276,7 +285,7 @@ impl Faucet {
 
         let desired_balance = std::cmp::max(
             total_balance / options.num_clients * 8 / 10,
-            U512::from(options.faucet_grant_amount) * 2u64,
+            options.min_funding_balance().into(),
         );
         // At this point, `desired_balance` is less than the average of all the clients' balances,
         // each of which was a `U256`, so we can safely cast back into a `U256`.
@@ -417,10 +426,9 @@ impl Faucet {
         }
     }
 
+    /// Handle external incoming transfers to faucet accounts
     async fn handle_non_faucet_transfer(&self, receipt: &TransactionReceipt) -> Result<()> {
-        // Not a transaction we are monitoring but the recipient could
-        // be a faucet account that is waiting for funding.
-        tracing::debug!("Handling incoming non-faucet transfer to {:?}", receipt.to);
+        tracing::debug!("Handling external incoming transfer to {:?}", receipt.to);
         if let Some(receiver) = receipt.to {
             if self
                 .state
@@ -430,17 +438,16 @@ impl Faucet {
                 .contains_key(&receiver)
             {
                 let balance = self.balance(receiver).await?;
-                if balance >= self.config.faucet_grant_amount {
-                    tracing::info!("Funded client {:?} with {:?}", receiver, balance);
+                if balance >= self.config.min_funding_balance() {
+                    tracing::info!("Funded client {:?} with external transfer", receiver);
                     let mut state = self.state.write().await;
-                    // Remove the funding transfer for this client
                     if let Some(transfer_index) =
                         state.transfer_queue.iter().position(|r| r.to() == receiver)
                     {
-                        tracing::info!("Removing funding transfer from queue");
+                        tracing::info!("Removing funding request from queue");
                         state.transfer_queue.remove(transfer_index);
                     } else {
-                        tracing::warn!("Funding transfer not found in queue");
+                        tracing::warn!("Funding request not found in queue");
                     }
                     tracing::info!("Making client {receiver:?} available");
                     let client = state.clients_being_funded.remove(&receiver).unwrap();
@@ -474,6 +481,8 @@ impl Faucet {
         // Using `cloned` here to avoid borrow
         let inflight = self.state.read().await.inflight.get(&tx_hash).cloned();
         if inflight.is_none() {
+            // Not a transaction we are monitoring but the recipient could
+            // be a faucet account that is waiting for funding.
             return self.handle_non_faucet_transfer(&receipt).await;
         }
 
@@ -550,6 +559,11 @@ impl Faucet {
                     continue;
                 }
             };
+
+            // There is some room for optimization here because we are fetching
+            // every transaction receipt. We could use the `get_block_with_txs` of
+            // the ethers-rs provider to avoid fetching individual transaction
+            // receipts.
 
             let mut stream = provider
                 .subscribe_blocks()
