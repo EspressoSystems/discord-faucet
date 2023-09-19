@@ -111,7 +111,7 @@ pub struct Options {
         long,
         env = "ESPRESSO_DISCORD_FAUCET_POLL_INTERVAL",
         default_value = "7s",
-        value_parser = parse_duration::parse,
+        value_parser = duration_str::parse,
     )]
     pub poll_interval: Duration,
 }
