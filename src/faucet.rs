@@ -59,7 +59,11 @@ pub struct Options {
     ///
     /// Subsequent accounts, if requested, will be derived from consecutively increasing account
     /// indices.
-    #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX")]
+    #[arg(
+        long,
+        env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX",
+        default_value = "0"
+    )]
     pub first_account_index: u32,
 
     /// Port on which to serve the API.
@@ -75,7 +79,8 @@ pub struct Options {
     #[arg(
         long,
         env = "ESPRESSO_DISCORD_FAUCET_GRANT_AMOUNT_ETHERS",
-        value_parser = |arg: &str| -> Result<U256, ConversionError> { Ok(parse_ether(arg)?) }
+        value_parser = |arg: &str| -> Result<U256, ConversionError> { Ok(parse_ether(arg)?) },
+        default_value = "100",
     )]
     pub faucet_grant_amount: U256,
 
@@ -116,18 +121,17 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            num_clients: 10,
-            mnemonic: TEST_MNEMONIC.to_string(),
-            first_account_index: 0,
-            port: 8111,
-            faucet_grant_amount: parse_ether("100").unwrap(),
-            transaction_timeout: Duration::from_secs(300),
-            provider_url_ws: Some(Url::parse("ws://localhost:8545").unwrap()),
-            provider_url_http: Url::parse("http://localhost:8545").unwrap(),
-            discord_token: None,
-            poll_interval: Duration::from_secs(7),
-        }
+        // Supply explicit default arguments for the required command line arguments. For everything
+        // else just use the default value specified via clap.
+        Self::parse_from([
+            "--",
+            "--mnemonic",
+            TEST_MNEMONIC,
+            "--provider-url-ws",
+            "ws://localhost:8545",
+            "--provider-url-http",
+            "http://localhost:8545",
+        ])
     }
 }
 
