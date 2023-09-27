@@ -4099,7 +4099,7 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer-utils"
 version = "0.1.0"
-source = "git+https://github.com/EspressoSystems/espresso-sequencer.git#9d6e2ca5563e12bd1138930eb8c7a40968678f75"
+source = "git+https://github.com/EspressoSystems/espresso-sequencer.git#1eb16366a0323d848ebfa90c02867a99a23ee747"
 dependencies = [
  "ark-serialize",
  "async-std",
