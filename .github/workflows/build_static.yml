@@ -20,7 +20,7 @@ jobs:
       matrix:
         arch:
           - amd
-          - arm
+          #- arm # ARM DISABLED FOR EXTEMELY LONG BUILD TIME
     steps:
       - name: Prepare AMD
         if: ${{ matrix.arch == 'amd' }}
