@@ -33,6 +33,3 @@ jobs:
 
       - name: Check
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Audit
-        run: cargo audit
