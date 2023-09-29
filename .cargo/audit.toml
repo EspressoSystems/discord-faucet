@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+  # `tungstenite`, 3rd party dependency
+  # https://rustsec.org/advisories/RUSTSEC-2023-0065
+  # Requires new tide-websockets release: https://github.com/http-rs/tide-websockets/issues/31
+  "RUSTSEC-2023-0065",
+]
