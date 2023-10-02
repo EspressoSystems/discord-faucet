@@ -5,17 +5,15 @@
 // along with the Discord Faucet library. If not, see <https://mit-license.org/>.
 
 use anyhow::{Error, Result};
-use async_std::{
-    channel::Receiver,
-    sync::RwLock,
-    task::{sleep, JoinHandle},
-};
+use async_std::{channel::Receiver, sync::RwLock, task::JoinHandle};
 use clap::Parser;
 use ethers::{
     prelude::SignerMiddleware,
     providers::{Http, Middleware as _, Provider, StreamExt, Ws},
     signers::{coins_bip39::English, LocalWallet, MnemonicBuilder, Signer},
-    types::{Address, TransactionReceipt, TransactionRequest, H256, U256, U512},
+    types::{
+        Address, BlockId, Transaction, TransactionReceipt, TransactionRequest, H256, U256, U512,
+    },
     utils::{parse_ether, ConversionError},
 };
 use std::{
@@ -61,7 +59,11 @@ pub struct Options {
     ///
     /// Subsequent accounts, if requested, will be derived from consecutively increasing account
     /// indices.
-    #[arg(long, env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX")]
+    #[arg(
+        long,
+        env = "ESPRESSO_DISCORD_FAUCET_FIRST_ACCOUNT_INDEX",
+        default_value = "0"
+    )]
     pub first_account_index: u32,
 
     /// Port on which to serve the API.
@@ -77,7 +79,8 @@ pub struct Options {
     #[arg(
         long,
         env = "ESPRESSO_DISCORD_FAUCET_GRANT_AMOUNT_ETHERS",
-        value_parser = |arg: &str| -> Result<U256, ConversionError> { Ok(parse_ether(arg)?) }
+        value_parser = |arg: &str| -> Result<U256, ConversionError> { Ok(parse_ether(arg)?) },
+        default_value = "100",
     )]
     pub faucet_grant_amount: U256,
 
@@ -118,18 +121,17 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            num_clients: 10,
-            mnemonic: TEST_MNEMONIC.to_string(),
-            first_account_index: 0,
-            port: 8111,
-            faucet_grant_amount: parse_ether("100").unwrap(),
-            transaction_timeout: Duration::from_secs(300),
-            provider_url_ws: Some(Url::parse("ws://localhost:8545").unwrap()),
-            provider_url_http: Url::parse("http://localhost:8545").unwrap(),
-            discord_token: None,
-            poll_interval: Duration::from_secs(7),
-        }
+        // Supply explicit default arguments for the required command line arguments. For everything
+        // else just use the default value specified via clap.
+        Self::parse_from([
+            "--",
+            "--mnemonic",
+            TEST_MNEMONIC,
+            "--provider-url-ws",
+            "ws://localhost:8545",
+            "--provider-url-http",
+            "http://localhost:8545",
+        ])
     }
 }
 
@@ -499,8 +501,23 @@ impl Faucet {
         Ok(())
     }
 
-    async fn handle_receipt(&self, tx_hash: H256) -> Result<()> {
+    async fn handle_tx(&self, tx: Transaction) -> Result<()> {
+        let tx_hash = tx.hash();
         tracing::debug!("Got tx hash {:?}", tx_hash);
+
+        // Using `cloned` here to avoid borrow
+        let state = self.state.read().await;
+        let inflight = state.inflight.get(&tx_hash).cloned();
+
+        // Only continue if there's an inflight transfer or the recipient is a client being funded.
+        let is_relevant = inflight.is_some()
+            || (tx.to.is_some() && state.clients_being_funded.contains_key(&tx.to.unwrap()));
+
+        drop(state);
+
+        if !is_relevant {
+            return Ok(());
+        }
 
         // In case there is a race condition and the receipt is not yet available, wait for it.
         let receipt = loop {
@@ -513,11 +530,7 @@ impl Faucet {
 
         tracing::debug!("Got receipt {:?}", receipt);
 
-        // Using `cloned` here to avoid borrow
-        let inflight = self.state.read().await.inflight.get(&tx_hash).cloned();
         if inflight.is_none() {
-            // Not a transaction we are monitoring but the recipient could
-            // be a faucet account that is waiting for funding.
             return self.handle_non_faucet_transfer(&receipt).await;
         }
 
@@ -585,61 +598,44 @@ impl Faucet {
 
     async fn monitor_transactions(&self) -> Result<()> {
         loop {
-            let stream = match &self.ws_provider {
-                Some(provider) => provider.subscribe_blocks().await.unwrap().boxed(),
-                None => self
-                    .provider
-                    .watch_blocks()
+            let mut stream = match &self.ws_provider {
+                Some(provider) => provider
+                    .subscribe_blocks()
                     .await
                     .unwrap()
-                    .then(|block_hash| async move {
-                        loop {
-                            match self.provider.get_block(block_hash).await {
-                                Ok(Some(block)) => break Ok(block),
-                                Ok(None) =>
-                                // Pass the block hash through so we can use it for error
-                                // handling.
-                                {
-                                    break Err(block_hash)
-                                }
-                                Err(err) => {
-                                    tracing::error!(
-                                        "Failed to get block {block_hash}: {err}, will retry"
-                                    );
-                                    sleep(Duration::from_secs(5)).await;
-                                }
-                            }
+                    .filter_map(|block| async move {
+                        if block.hash.is_none() {
+                            tracing::warn!("Received block without hash, ignoring: {block:?}");
                         }
-                    })
-                    .filter_map(|res| async move {
-                        match res {
-                            Ok(block) => Some(block),
-                            Err(hash) => {
-                                // `provider.get_block` is allowed to return `None` if it cannot
-                                // find a block with the requested hash. Since we only ever request
-                                // block hashes that have just been confirmed by `watch_blocks`, the
-                                // only way a block can possibly be missing is if there was an L2
-                                // reorg. This is rare but possible. In this case, since the block
-                                // we were fetching has been re-orged out, we can just ignore it.
-                                tracing::error!(
-                                    "received hash {hash} from watch_blocks, but block was missing"
-                                );
-                                None
-                            }
-                        }
+                        block.hash
                     })
                     .boxed(),
+                None => self.provider.watch_blocks().await.unwrap().boxed(),
             };
-
-            // There is some room for optimization here because we are fetching every transaction
-            // receipt. We could use the `get_block_with_txs` of the ethers-rs provider to avoid
-            // fetching individual transaction receipts.
-            let mut stream = stream.flat_map(|block| futures::stream::iter(block.transactions));
 
             self.state.write().await.monitoring_started = true;
             tracing::info!("Transaction monitoring started ...");
-            while let Some(tx_hash) = stream.next().await {
-                self.handle_receipt(tx_hash).await?;
+
+            while let Some(hash) = stream.next().await {
+                if let Some(block) = self
+                    .provider
+                    .get_block_with_txs(BlockId::from(hash))
+                    .await?
+                {
+                    for tx in block.transactions.iter() {
+                        self.handle_tx(tx.clone()).await?;
+                    }
+                } else {
+                    // `provider.get_block_with_txs` is allowed to return `None` if it cannot
+                    // find a block with the requested hash. Since we only ever request
+                    // block hashes that have just been confirmed by `watch_blocks`, the
+                    // only way a block can possibly be missing is if there was an L2
+                    // reorg. This is rare but possible. In this case, since the block
+                    // we were fetching has been re-orged out, we can just ignore it.
+                    tracing::error!(
+                        "received hash {hash} from watch_blocks, but block was missing"
+                    );
+                }
             }
 
             // If we get here, the subscription was closed. This happens for example
@@ -797,7 +793,8 @@ mod test {
         assert_eq!(faucet.state.read().await.clients_being_funded.len(), 1);
 
         let tx_hash = faucet.execute_transfer().await?;
-        faucet.handle_receipt(tx_hash).await?;
+        let tx = faucet.provider.get_transaction(tx_hash).await?.unwrap();
+        faucet.handle_tx(tx).await?;
 
         let mut state = faucet.state.write().await;
         // The newly funded client is now funded.
