@@ -7,7 +7,7 @@
 use anyhow::{Error, Result};
 use async_std::{
     channel::Receiver,
-    sync::RwLock,
+    sync::{RwLock, RwLockUpgradableReadGuard},
     task::{sleep, JoinHandle},
 };
 use clap::Parser;
@@ -471,17 +471,12 @@ impl Faucet {
     async fn handle_non_faucet_transfer(&self, receipt: &TransactionReceipt) -> Result<()> {
         tracing::debug!("Handling external incoming transfer to {:?}", receipt.to);
         if let Some(receiver) = receipt.to {
-            if self
-                .state
-                .read()
-                .await
-                .clients_being_funded
-                .contains_key(&receiver)
-            {
+            let state = self.state.upgradable_read().await;
+            if state.clients_being_funded.contains_key(&receiver) {
                 let balance = self.balance(receiver).await?;
                 if balance >= self.config.min_funding_balance() {
                     tracing::info!("Funded client {:?} with external transfer", receiver);
-                    let mut state = self.state.write().await;
+                    let mut state = RwLockUpgradableReadGuard::upgrade(state).await;
                     if let Some(transfer_index) =
                         state.transfer_queue.iter().position(|r| r.to() == receiver)
                     {
