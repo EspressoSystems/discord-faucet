@@ -532,7 +532,10 @@ impl Faucet {
 
         tracing::debug!("Got receipt {:?}", receipt);
 
-        let Some(Transfer{sender, request, ..}) = inflight else {
+        let Some(Transfer {
+            sender, request, ..
+        }) = inflight
+        else {
             return self.handle_non_faucet_transfer(&receipt).await;
         };
 
