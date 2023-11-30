@@ -1003,6 +1003,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
 
 [[package]]
+name = "contract-bindings"
+version = "0.1.0"
+source = "git+https://github.com/EspressoSystems/espresso-sequencer.git#f2ae6797c563b87d51c2be0629842dbfab3437e4"
+dependencies = [
+ "ethers",
+ "serde",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4099,11 +4108,13 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer-utils"
 version = "0.1.0"
-source = "git+https://github.com/EspressoSystems/espresso-sequencer.git#9d6e2ca5563e12bd1138930eb8c7a40968678f75"
+source = "git+https://github.com/EspressoSystems/espresso-sequencer.git#f2ae6797c563b87d51c2be0629842dbfab3437e4"
 dependencies = [
+ "anyhow",
  "ark-serialize",
  "async-std",
  "commit",
+ "contract-bindings",
  "ethers",
  "portpicker",
  "surf",
