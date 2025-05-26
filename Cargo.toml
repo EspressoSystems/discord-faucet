@@ -11,12 +11,12 @@ async-compatibility-layer = { git = "https://github.com/EspressoSystems/async-co
     "channel-async-std",
 ] }
 async-std = { version = "1.12.0", features = ["attributes", "tokio1"] }
-clap = { version = "4.4.4", features = ["env"] }
+clap = { version = "4.4.18", features = ["env"] }
 duration-str = "0.7"
 ethers = { version = "2.0.7", features = ["ws"] }
 futures = "0.3.28"
 portpicker = "0.1.1"
-regex = "1.9.6"
+regex = "1.10.4"
 serde = "1.0.164"
 serenity = { version = "0.11", default-features = false, features = [
     "client",
@@ -25,9 +25,9 @@ serenity = { version = "0.11", default-features = false, features = [
     "model",
 ] }
 surf-disco = { git = "https://github.com/EspressoSystems/surf-disco", tag = "v0.4.2" }
-thiserror = "1.0.49"
+thiserror = "1.0.55"
 tide-disco = { git = "https://github.com/EspressoSystems/tide-disco", tag = "v0.4.2" }
-toml = "0.7"
+toml = "0.8"
 tracing = "0.1.37"
 url = "2.4.0"
 
